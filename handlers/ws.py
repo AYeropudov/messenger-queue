@@ -6,14 +6,16 @@ from aiohttp import WSMsgType
 
 class WebSocketHandler(web.View):
     def __init__(self, request):
+        self.channel = None
+        self.redis_pub_conn = None
         super().__init__(request)
 
     async def log(self, msg):
         print(msg)
 
-    async def subscribe_channel(self, channel):
+    async def subscribe_channel(self):
         _app = self.request.app
-        await _app['sub'].subscribe(_app['mpsc'].channel(channel))
+        await _app['sub'].subscribe(_app['receiver'].channel(self.channel))
 
     async def un_subscribe_channel(self, channel):
         _app = self.request.app
@@ -27,12 +29,14 @@ class WebSocketHandler(web.View):
         ws = web.WebSocketResponse()
         await ws.prepare(self.request)
         await self.log('Connected to server')
-        _channel = "room:{}".format(_room_id)
+        self.channel = "room:{}".format(_room_id)
         try:
-            _app.ws_list[_channel].append(ws)
+            _app.ws_list[self.channel].append(ws)
         except KeyError:
-            _app.ws_list[_channel] = [ws]
-        await self.subscribe_channel(_channel)
+            _app.ws_list[self.channel] = [ws]
+
+        await self.subscribe_channel()
+
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
                 if msg.data == 'close':
@@ -42,18 +46,15 @@ class WebSocketHandler(web.View):
                     if text.startswith('/'):
                         await self.command(text)
                     else:
-                        await self.log(msg)
-                        with await self.redis_pub_conn as publisher:
-                            await self.log('try to publish')
-                            await publisher.publish_json("room:{}".format(_room_id), msg.json())
+                        await self.process_message(msg)
             elif msg.type == WSMsgType.ERROR:
                 print('ws connection closed with exception %s' %
                       ws.exception())
 
         await self.log('websocket connection closed')
-        _app.ws_list[_channel].remove(ws)
+        _app.ws_list[self.channel].remove(ws)
 
-        await self.un_subscribe_channel(channel=_channel)
+        await self.un_subscribe_channel(channel=self.channel)
         await self.log('Channel close')
         return ws
 
@@ -62,3 +63,9 @@ class WebSocketHandler(web.View):
             await self.log(self.request.app.registered_servers)
         else:
             await self.log('Нет такой команды')
+
+    async def process_message(self, msg):
+        await self.log(msg)
+        with await self.redis_pub_conn as publisher:
+            await self.log('try to publish')
+            await publisher.publish_json(self.channel, msg.json())
